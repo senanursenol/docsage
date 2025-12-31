@@ -1,5 +1,12 @@
+# Sanal Ortamlar
 venv/
-backend/venv/
+.venv/
+env/
 .env
+
+# Python Derleme Dosyaları
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+

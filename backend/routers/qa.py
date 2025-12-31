@@ -1,15 +1,9 @@
-import re
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List
-
 from routers.documents import DOCUMENT_STORE
-from services.qa_service import (
-    generate_answer_from_contexts,
-    retrieve_globally_relevant_chunks,
-    is_negative_question,
-    extract_question_focus
-)
+# retrieve fonksiyonunun adını ve dönüş tipini serviste güncellediğimizi varsayarak (aşağıda anlatacağım):
+from services.qa_service import generate_answer_from_contexts, retrieve_globally_relevant_chunks
 
 router = APIRouter(prefix="/qa", tags=["qa"])
 
@@ -24,16 +18,14 @@ class QAResponse(BaseModel):
 @router.post("/", response_model=QAResponse)
 def qa_endpoint(request: QuestionRequest):
     documents = []
-
     for doc_id in request.doc_ids:
         if doc_id not in DOCUMENT_STORE:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Doküman bulunamadı: {doc_id}"
-            )
+            raise HTTPException(status_code=404, detail=f"Doküman bulunamadı: {doc_id}")
         documents.append(DOCUMENT_STORE[doc_id])
 
-    # 1️⃣ Retrieval
+    # 1. Semantik Arama (Retrieval)
+    # Burada servisten sadece metinleri değil, skorları da dikkate alacak bir yapı kurabiliriz.
+    # Şimdilik standart retrieval yapalım.
     contexts = retrieve_globally_relevant_chunks(
         question=request.question,
         documents=documents,
@@ -41,32 +33,18 @@ def qa_endpoint(request: QuestionRequest):
         max_chunks=5
     )
 
+    # Eğer hiç bağlam bulunamadıysa veya bulunan bağlamlar çok kısaysa direkt red.
     if not contexts or len(" ".join(contexts).strip()) < 50:
         return QAResponse(
-            answer="Bu dokümanlarda bu bilgi yer almıyor.",
+            answer="Bu dokümanlarda bu bilgi yer almıyor (İlgili içerik bulunamadı).",
             context_chunks=[]
         )
 
-    # 2️⃣ Negatif soru kontrolü 
-    question = request.question
-
-    if is_negative_question(question):
-        combined_context = " ".join(contexts).lower()
-
-        focus_tokens = [
-        w for w in re.findall(r"\b\w+\b", request.question.lower())
-        if len(w) > 3 and w not in {"does", "document", "mention", "there", "any"}
-    ]
-
-    if not any(tok in combined_context for tok in focus_tokens):
-        return QAResponse(
-            answer="Bu dokümanlarda bu bilgi yer almıyor.",
-            context_chunks=contexts
-        )
-
-    # 3️⃣ LLM generation
+    # 2. LLM ile Cevap Üretme
+    # Gereksiz "focus_tokens" kontrolünü sildik. Artık semantik bağlam çalışacak.
+    # LLM, prompt içindeki "Bilgi yoksa söyle" talimatına uyacaktır.
     answer = generate_answer_from_contexts(
-        question=question,
+        question=request.question,
         contexts=contexts
     )
 
