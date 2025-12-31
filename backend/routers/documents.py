@@ -4,7 +4,7 @@ import uuid
 
 from services.document_service import extract_text_from_file
 from services.documents import DocumentObject
-from services.qa_service import split_into_chunks
+from services.documents import split_into_chunks
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 

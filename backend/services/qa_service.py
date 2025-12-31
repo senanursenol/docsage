@@ -1,49 +1,78 @@
 import numpy as np
 
-from typing import List, Tuple
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from typing import List
 import re
 
-from services.embedding_service import EmbeddingStore
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
+
 from services.documents import DocumentObject
 
-embedding_store = EmbeddingStore()
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct" 
 
-MODEL_NAME = "google/flan-t5-base" 
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_NAME,
+    trust_remote_code=True
+)
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_NAME,
+    device_map="cpu",
+    torch_dtype=torch.float32,
+    trust_remote_code=True
+)
 
-embedding_store = EmbeddingStore()
+model.eval()
 
-from typing import List, Tuple
+def is_negative_question(question: str) -> bool:
+    """
+    Belgenin bir konuyu içerip içermediğini soran
+    evet/hayır tipi soruları yakalar.
+    """
+    if not isinstance(question, str):
+        return False
 
-def clean_answer(text: str) -> str:
-    text = text.replace("\n", " ")
-    text = re.sub(r"\s+", " ", text).strip()
-    if text and text[-1] not in ".!?":
-        text += "."
-    return text
+    q = question.lower().strip()
 
-def split_into_chunks(
-    text: str,
-    max_chars: int = 500,
-    overlap: int = 100
-):
-    chunks = []
-    start = 0
-    text_length = len(text)
+    patterns = [
+        r"^does the document mention\b",
+        r"^does it mention\b",
+        r"^does it talk about\b",
+        r"^is there any mention of\b",
+        r"^is .* discussed\b",
+        r"^is .* mentioned\b",
+    ]
 
-    while start < text_length:
-        end = start + max_chars
-        chunk = text[start:end]
-        chunks.append(chunk.strip())
+    return any(re.search(p, q) for p in patterns)
 
-        start = end - overlap
-        if start < 0:
-            start = 0
+def extract_question_focus(question: str) -> str | None:
+    """
+    Negatif (does/is) sorularda sorulan asıl kavramı çıkarır.
 
-    return chunks
+    Örnek:
+    "Does the document mention design patterns?"
+    -> "design patterns"
+    """
+    if not isinstance(question, str):
+        return None
+
+    q = question.lower().strip()
+
+    patterns = [
+        r"does the document mention (.+)",
+        r"does it mention (.+)",
+        r"does it talk about (.+)",
+        r"is there any mention of (.+)",
+        r"is (.+) discussed",
+        r"is (.+) mentioned",
+    ]
+
+    for p in patterns:
+        m = re.search(p, q)
+        if m:
+            return m.group(1).strip(" ?.")
+
+    return None
 
 def generate_answer_from_contexts(
     question: str,
@@ -52,33 +81,26 @@ def generate_answer_from_contexts(
     context_text = "\n\n".join(contexts)
 
     prompt_2 = f"""
-    Role:
-    You are a document-grounded question answering expert. Your task is to answer questions strictly and exclusively based on the provided document text.
+    You are a document-grounded question answering assistant.
 
-    Core Principle:
-    - The document text is the ONLY source of truth.
-    - Every part of your answer must be directly supported by the document content.
+    Your task is to answer the question using ONLY the information provided in the document text below.
+    You may paraphrase and combine related statements from the document, but you MUST NOT add any new information or external knowledge.
 
     Rules:
-    1. Use only the information explicitly stated or clearly implied within the document.
-    2. You may reason semantically within the document (understand meaning, paraphrase, and connect related statements), but you must NOT introduce new facts.
-    3. Do NOT use any external knowledge, prior training data, or assumptions.
-    4. The answer must be a single, short explanatory sentence.
-    5. Do NOT include book titles, author names, copyright notices, or publication details.
-    6. Do NOT add explanations, justifications, examples, or restate the question.
-    7. Do NOT mention the document, source, or analysis process.
+    - The answer must be a single, clear, explanatory sentence.
+    - Do NOT include book titles, author names, copyright notices, or publication details.
+    - Do NOT add examples, explanations, or restate the question.
+    - Do NOT mention the document or your reasoning process.
 
-    Fallback Rule:
-    - If the document does NOT contain enough information to answer the question, output EXACTLY the following sentence and nothing else:
+    If the document does NOT contain enough information to answer the question, reply EXACTLY with:
     "Bu dokümanlarda bu bilgi yer almıyor."
 
-    Document Text:
+    Document:
     {context_text}
 
     Question:
     {question}
 
-    Output Format:
     Answer:
     """
 
@@ -86,42 +108,38 @@ def generate_answer_from_contexts(
         prompt_2,
         return_tensors="pt",
         truncation=True,
-        max_length=512
+        max_length=2048
     )
 
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=1024,
-        num_beams=4,
-        early_stopping=True,
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=1024,
+            do_sample=False,
+            temperature=0.0,
+            eos_token_id=tokenizer.eos_token_id
+        )
+
+    decoded = tokenizer.decode(
+        outputs[0],
+        skip_special_tokens=True
     )
 
-    answer = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+    if "Answer:" in decoded:
+        answer = decoded.split("Answer:")[-1].strip()
+    else:
+        answer = decoded.strip()
 
+    # Güvenlik: çok kısa / anlamsız cevap
+    if len(answer) < 10:
+        return "Bu dokümanlarda bu bilgi yer almıyor."
+
+    # Metadata sızıntı guard
     for banned in ["Packt", "Publishing", "Edition", "Copyright"]:
         if banned.lower() in answer.lower():
             return "Bu dokümanlarda bu bilgi yer almıyor."
         
     return answer
-
-def retrieve_from_multiple_documents(
-    question: str,
-    documents: List[DocumentObject],
-    k_per_doc: int = 3,
-    max_chunks: int = 5
-) -> List[str]:
-    all_chunks = []
-
-    for document in documents:
-        results = document.embedding_store.search(
-            question,
-            k=k_per_doc
-        )
-        for r in results:
-            all_chunks.append(r["text"])
-
-    # şimdilik: ilk max_chunks tanesini al
-    return all_chunks[:max_chunks]
 
 def retrieve_globally_relevant_chunks(
     question: str,

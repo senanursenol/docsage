@@ -1,18 +1,9 @@
 from fastapi import FastAPI
-from routers import documents, qa
 
-app = FastAPI(title="DocSage API")
+from routers.documents import router as documents_router
+from routers.qa_router import router as qa_router
 
-app.include_router(documents.router)
-app.include_router(qa.router)
+app = FastAPI(title="Document QA API")
 
-
-@app.get("/")
-def root():
-    return {"message": "DocSage backend is alive"}
-
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
-
+app.include_router(documents_router)
+app.include_router(qa_router)
