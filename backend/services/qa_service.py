@@ -8,8 +8,7 @@ from services.documents import DocumentObject
 # --- AYARLAR ---
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct" 
 
-# Model cevabı bulamadığında döneceği STANDART İNGİLİZCE MESAJ
-# (Bunu en tepeye koyduk ki her yerde aynısını kullanalım)
+# Model cevabı bulamadığında döneceği standart mesaj
 NO_ANSWER_MSG = "I am sorry, I could not find the answer to this question in the provided documents."
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -25,9 +24,8 @@ model.eval()
 
 def calculate_hybrid_match(question: str, text: str) -> float:
     """
-    Keyword Skorlayıcı:
-    - Stop Words temizlenir.
-    - Özel isimler (Pydantic, Django) metinde yoksa CEZA kesilir.
+    Keyword Skorlayıcı: Stop words temizlenir, özel isimler (Proper Nouns) korunur.
+    Özel isimler metinde yoksa skor düşürülür (ceza).
     """
     stops = {
         "what", "how", "why", "when", "does", "do", "did", "can", "could", 
@@ -47,7 +45,7 @@ def calculate_hybrid_match(question: str, text: str) -> float:
 
     for w_lower in words:
         original = word_case_map.get(w_lower, w_lower)
-        # Baş harfi büyükse (Özel İsim) -> 3.0 Puan
+        # Baş harfi büyükse (Özel İsim) -> Yüksek Puan
         if original[0].isupper():
             weights[w_lower] = 3.0
         elif len(w_lower) > 6:
@@ -63,7 +61,7 @@ def calculate_hybrid_match(question: str, text: str) -> float:
         if re.search(rf"\b{re.escape(word)}\b", text_lower):
             score += weight
         elif weight >= 3.0: 
-            # KRİTİK: Özel isim yoksa ceza kes (1.0 puan düşür)
+            # Özel isim yoksa ceza kes
             penalty += 1.0
 
     return max(0.0, (score - penalty) / total_weight)
@@ -75,10 +73,13 @@ def retrieve_globally_relevant_chunks(
     documents: List[DocumentObject],
     k_per_doc: int = 5,
     max_chunks: int = 5,
-    threshold: float = 0.35,  # Eşik değeri (Skorlar 0.40+ geliyordu, burası güvenli)
+    threshold: float = 0.35,
     vec_weight: float = 0.65
 ) -> List[str]:
-    
+    """
+    Tüm dokümanlar arasında hem vektör benzerliği hem de anahtar kelime eşleşmesi
+    kullanarak en alakalı parçaları bulur (Hybrid Search).
+    """
     candidates = list({r["text"] for doc in documents for r in doc.embedding_store.search(question, k=k_per_doc)})
     if not candidates: return []
 
@@ -90,19 +91,16 @@ def retrieve_globally_relevant_chunks(
     if v_scores.ndim == 0: v_scores = [v_scores]
 
     final_results = []
-    print(f"\n--- QUERY: {question} ---")
     
     for text, v_score in zip(candidates, v_scores):
         k_score = calculate_hybrid_match(question, text)
+        # Vektör ve Keyword skorlarını ağırlıklandırarak birleştir
         h_score = (v_score * vec_weight) + (k_score * (1 - vec_weight))
         
         if h_score >= threshold:
             final_results.append((h_score, text))
-            # Debug log
-            print(f"✅ Pass: {h_score:.3f} (V:{v_score:.2f} | K:{k_score:.2f}) -> {text[:30]}...")
-        else:
-            print(f"❌ Fail: {h_score:.3f} (V:{v_score:.2f} | K:{k_score:.2f})")
 
+    # En yüksek skorlu parçaları döndür
     return [res[1] for res in sorted(final_results, key=lambda x: x[0], reverse=True)[:max_chunks]]
 
 # --- GENERATION (CEVAP ÜRETME) ---
@@ -111,7 +109,9 @@ def generate_answer_from_contexts(
     question: str,
     contexts: List[str]
 ) -> str:
-    # Eğer hiç context yoksa direkt standart mesajı dön
+    """
+    Bulunan bağlamları kullanarak LLM'e (Language Model) cevap ürettirir.
+    """
     if not contexts:
         return NO_ANSWER_MSG
 
@@ -175,12 +175,11 @@ def generate_answer_from_contexts(
         if cut_phrase in answer:
             answer = answer.replace(cut_phrase, "").strip()
 
-    # 2. Hatalı {NO_ANSWER_MSG} çıktısını düzelt
-    # Model bazen tırnak içindeki değişken adını (literal) basabilir.
+    # 2. Hatalı placeholder çıktısını düzelt
     if "{NO_ANSWER_MSG}" in answer or "NO_ANSWER_MSG" in answer:
         return NO_ANSWER_MSG
 
-    # 3. Telif hakkı vb. uyarıları varsa cevap yoktur
+    # 3. Telif hakkı vb. uyarıları varsa cevap yoktur (Hallüsinasyon önlemi)
     for banned in ["Packt", "Publishing", "Copyright", "All rights reserved"]:
         if banned.lower() in answer.lower():
             return NO_ANSWER_MSG

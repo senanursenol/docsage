@@ -8,27 +8,45 @@ from services.documents import split_into_chunks
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
+# Dokümanları bellekte tutmak için store
 DOCUMENT_STORE: Dict[str, DocumentObject] = {}
 
 @router.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
+    """
+    Tek bir dosya yükler (PDF/DOCX), metni ayıklar ve store'a kaydeder.
+    """
     filename = file.filename or "document"
-    ext = filename.split(".")[-1].lower()
+    
+    # Dosya uzantısını güvenli şekilde kontrol et
+    parts = filename.split(".")
+    ext = parts[-1].lower() if len(parts) > 1 else ""
 
     if ext not in ["pdf", "docx"]:
-        raise HTTPException(status_code=400, detail="Sadece PDF ve DOCX destekleniyor.")
+        raise HTTPException(status_code=400, detail="Sadece PDF ve DOCX dosyaları destekleniyor.")
 
-    content = await file.read()
-    text = extract_text_from_file(content, ext)
+    try:
+        content = await file.read()
+        
+        # 1. Metni ayıkla
+        text = extract_text_from_file(content, ext)
 
-    chunks = split_into_chunks(text)
-    doc_obj = DocumentObject(chunks=chunks)
+        # 2. Metni parçalara böl
+        chunks = split_into_chunks(text)
+        
+        # 3. DocumentObject oluştur
+        doc_obj = DocumentObject(chunks=chunks)
 
-    doc_id = str(uuid.uuid4())
-    DOCUMENT_STORE[doc_id] = doc_obj
+        # 4. ID oluştur ve sakla
+        doc_id = str(uuid.uuid4())
+        DOCUMENT_STORE[doc_id] = doc_obj
+        
+        return {
+            "doc_id": doc_id,
+            "filename": filename,
+            "num_chars": len(chunks)
+        }
 
-    return {
-        "doc_id": doc_id,
-        "filename": filename,
-        "num_chars": len(chunks)
-    }
+    except Exception as e:
+        # Hata detayını kullanıcıya/frontend'e dön
+        raise HTTPException(status_code=500, detail=f"Dosya işlenirken hata oluştu: {str(e)}")

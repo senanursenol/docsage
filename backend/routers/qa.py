@@ -2,7 +2,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List
 from routers.documents import DOCUMENT_STORE
-# retrieve fonksiyonunun adını ve dönüş tipini serviste güncellediğimizi varsayarak (aşağıda anlatacağım):
 from services.qa_service import generate_answer_from_contexts, retrieve_globally_relevant_chunks
 
 router = APIRouter(prefix="/qa", tags=["qa"])
@@ -24,8 +23,6 @@ def qa_endpoint(request: QuestionRequest):
         documents.append(DOCUMENT_STORE[doc_id])
 
     # 1. Semantik Arama (Retrieval)
-    # Burada servisten sadece metinleri değil, skorları da dikkate alacak bir yapı kurabiliriz.
-    # Şimdilik standart retrieval yapalım.
     contexts = retrieve_globally_relevant_chunks(
         question=request.question,
         documents=documents,
@@ -33,16 +30,14 @@ def qa_endpoint(request: QuestionRequest):
         max_chunks=5
     )
 
-    # Eğer hiç bağlam bulunamadıysa veya bulunan bağlamlar çok kısaysa direkt red.
+    # Bağlam yetersizse veya boşsa erken dönüş yap
     if not contexts or len(" ".join(contexts).strip()) < 50:
         return QAResponse(
-            answer="Bu dokümanlarda bu bilgi yer almıyor (İlgili içerik bulunamadı).",
+            answer="I am sorry, but I could not find relevant information in the uploaded documents.",
             context_chunks=[]
         )
 
     # 2. LLM ile Cevap Üretme
-    # Gereksiz "focus_tokens" kontrolünü sildik. Artık semantik bağlam çalışacak.
-    # LLM, prompt içindeki "Bilgi yoksa söyle" talimatına uyacaktır.
     answer = generate_answer_from_contexts(
         question=request.question,
         contexts=contexts

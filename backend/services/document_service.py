@@ -3,13 +3,17 @@ from pypdf import PdfReader
 import docx
 
 def extract_text_from_file(content: bytes, ext: str) -> str:
+    """
+    Verilen dosya içeriğinden (bytes) metin ayıklar.
+    Desteklenen uzantılar: pdf, docx.
+    """
     ext = ext.lower()
     if ext == "pdf":
         return extract_text_from_pdf(content)
     elif ext == "docx":
         return extract_text_from_docx(content)
     else:
-        raise ValueError("Unsupported extension")
+        raise ValueError(f"Desteklenmeyen dosya formatı: {ext}")
 
 def extract_text_from_pdf(content: bytes) -> str:
     text = ""
